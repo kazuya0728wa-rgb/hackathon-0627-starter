@@ -44,26 +44,21 @@ public class UserRegistrationService {
         this.validator = validator;
         this.passwordHasher = passwordHasher;
         this.userRepository = userRepository;
-        this.userRegistrar = new UserRegistrar(userRepository);
+        this.userRegistrar = new UserRegistrar(userRepository, passwordHasher);
         this.emailService = emailService;
         this.auditLogger = auditLogger;
     }
 
     /**
      * メール / パスワードでユーザーを登録する（オーケストレーションのみ）。
+     *
+     * ユーザーの作成・保存は UserRegistrar に委譲し、ソーシャルログインと
+     * 「ユーザーを作る」共通の幹を1か所に集約している。
      */
     public RegisterResult register(RegisterInput input) {
         validator.validate(input);                                  // ① 検証
 
-        if (userRepository.existsByEmail(input.getEmail())) {       // ② 重複確認
-            throw new DuplicateUserException("このメールアドレスはすでに登録されています");
-        }
-
-        User user = new User();                                     // ③④ 組み立て＋保存
-        user.setEmail(input.getEmail());
-        user.setName(input.getName());
-        user.setPassword(passwordHasher.hash(input.getPassword()));
-        userRepository.save(user);
+        User user = userRegistrar.registerWithPassword(input);      // ②③④ 重複確認・作成・保存（共通の幹）
 
         emailService.sendWelcome(user);                            // ⑤ 通知
         auditLogger.logRegistration(user);                         // ⑥ 監査
@@ -258,27 +253,50 @@ public class UserRegistrationService {
         }
     }
 
-    /** find-or-create を一元化（パスワード登録とソーシャルの両入口が共有）。 */
+    /**
+     * ユーザーの作成・保存を一元化する（パスワード登録とソーシャルの両入口が共有）。
+     *
+     * 「User を作って保存する」共通処理を createBaseUser() という1本の幹にまとめ、
+     * 入口ごとの違い（パスワード or provider情報）だけを各メソッドで枝分かれさせている。
+     */
     static class UserRegistrar {
         private final UserRepository userRepository;
+        private final PasswordHasher passwordHasher;
 
-        public UserRegistrar(UserRepository userRepository) {
+        public UserRegistrar(UserRepository userRepository, PasswordHasher passwordHasher) {
             this.userRepository = userRepository;
+            this.passwordHasher = passwordHasher;
         }
 
-        /** ソーシャル経由：初回ログインなら自動登録、既存なら取得（単純1:1連携）。 */
+        /** 【枝①】メール/パスワード登録：重複確認 → 共通の幹 → パスワード付与 → 保存。 */
+        public User registerWithPassword(RegisterInput input) {
+            if (userRepository.existsByEmail(input.getEmail())) {
+                throw new DuplicateUserException("このメールアドレスはすでに登録されています");
+            }
+            User user = createBaseUser(input.getEmail(), input.getName());
+            user.setPassword(passwordHasher.hash(input.getPassword())); // メール固有
+            return userRepository.save(user);
+        }
+
+        /** 【枝②】ソーシャル経由：既存なら取得、初回なら共通の幹 → provider付与 → 保存（単純1:1）。 */
         public User findOrCreateBySocial(OAuthUserProfile profile) {
             User existing = userRepository.findByProvider(
                     profile.getProvider(), profile.getProviderUserId());
             if (existing != null) return existing;
 
-            User user = new User();
-            user.setEmail(profile.getEmail());
-            user.setName(profile.getName());
-            user.setProvider(profile.getProvider());
+            User user = createBaseUser(profile.getEmail(), profile.getName());
+            user.setProvider(profile.getProvider());                 // ソーシャル固有
             user.setProviderUserId(profile.getProviderUserId());
             // ソーシャルのみのためパスワードは無し。
             return userRepository.save(user);
+        }
+
+        /** 【共通の幹】どちらの入口も必ずここを通る。User生成の基本部分を1か所に集約。 */
+        private User createBaseUser(String email, String name) {
+            User user = new User();
+            user.setEmail(email);
+            user.setName(name);
+            return user;
         }
     }
 

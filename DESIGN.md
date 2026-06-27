@@ -62,7 +62,7 @@ OAuthUserProfile { provider, providerUserId, email, name }  // 各社の差異�
 ```
 
 **register() の流れ（分割後）**
-`validate → existsByEmail → hash → save → sendWelcome → logRegistration` を順に呼ぶだけの薄い実装になった。
+`validate → userRegistrar.registerWithPassword（重複確認・作成・保存をまとめた共通の幹）→ sendWelcome → logRegistration` を順に呼ぶだけの薄い実装になった。ユーザーの作成・保存はソーシャルログインと同じ `UserRegistrar` を通る。
 
 **ソーシャルログインの流れ**
 `registry.get(type) → provider.fetchProfile(code) → userRegistrar.findOrCreateBySocial → sessionIssuer.issue → auditLogger.logSocialLogin`。
@@ -73,7 +73,7 @@ OAuthUserProfile { provider, providerUserId, email, name }  // 各社の差異�
 ## 4. 工夫したポイント
 
 - **「どこまでを別の箱にするか」を設計の主題にした。** プロバイダ固有の箱を“コード→正規化プロフィール”だけに絞り、それ以外を共有コアに置いた。結果、Google追加は `GoogleOAuthProvider` を1クラス書いてレジストリに1行足すだけで、`SocialLoginService`・`UserRegistrar`・`UserRepository` は無改修で済む（Open/Closed原則）。
-- **find-or-create を `UserRegistrar` に一元化**し、パスワード登録とソーシャル登録でユーザー生成ロジックを二重化しないようにした。
+- **ユーザー生成を `UserRegistrar` の「共通の幹」に一元化した。** 「User を作って保存する」処理を `createBaseUser()` という1本の幹にまとめ、メール登録（パスワード付与）とソーシャル登録（provider付与）の違いだけを枝分かれさせた。これにより「ユーザーを作る」ロジックの二重化（コピペ）を排除し、作成ルールの変更を1か所で済むようにした。
 - **モック（Database/EmailClient）を直接使わず Adapter（DbUserRepository/ClientEmailService）で包んだ。** アプリ本体が具象モックを知らない状態にし、将来の実DB・実メール送信への差し替えを局所化した。
 - **ダミー実装を「隔離」した。** 偽ハッシュ化やGitHubのダミー応答を `FakePasswordHasher`・`FakeGithubProvider` に閉じ込め、本実装への差し替え範囲を1クラスに限定した。
 
